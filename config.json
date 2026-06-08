@@ -6,12 +6,34 @@
     "form_url": "https://docs.google.com/forms/d/1dYWyTvjDsR89MAOjNZrywLUd64VwIWkLI3QZul6R8DM/edit",
     "sheet_id": "1PRI43wyXkuagRDXvOJci9b6FOFdJRFbo3WU16HhtRf0",
     "sheet_gid": 2109398725,
-    "categories": []
+    "categories": [
+      "ประเภทเดี่ยวอายุ 60 ปีขึ้นไป (รวม)",
+      "ประเภทเดี่ยวอายุ 50 ปีขึ้นไป (ชาย)",
+      "ประเภทเดี่ยวอายุ 50 ปีขึ้นไป (หญิง)",
+      "ประเภทเดี่ยวอายุ 40 ปีขึ้นไป (ชาย)",
+      "ประเภทเดี่ยวอายุ 40 ปีขึ้นไป (หญิง)",
+      "ประเภทเดี่ยวอายุไม่เกิน 15 ปี(ชาย)",
+      "ประเภทเดี่ยวอายุไม่เกิน 15 ปี(หญิง)",
+      "ประเภทเดี่ยวอายุไม่เกิน 13 ปี(ชาย)",
+      "ประเภทเดี่ยวอายุไม่เกิน 13 ปี(หญิง)",
+      "ประเภทเดี่ยวอายุไม่เกิน 11 ปี(ชาย)",
+      "ประเภทเดี่ยวอายุไม่เกิน 11 ปี(หญิง)",
+      "ประเภทเดี่ยวอายุไม่เกิน 9 ปี(ชาย)",
+      "ประเภทเดี่ยวอายุไม่เกิน 9 ปี(หญิง)",
+      "ประเภทเดี่ยวอายุไม่เกิน 7 ปี(ชาย)",
+      "ประเภทเดี่ยวอายุไม่เกิน 7 ปี(หญิง)",
+      "ประเภททั่วไปไม่จำกัดมือ(หญิง)",
+      "ประเภททั่วไปไม่จำกัดมือ(ชาย)",
+      "ประเภททั่วไปจำกัดมือ(ชาย)"
+    ]
   },
   "team": {
-    "form_url": "https://docs.google.com/forms/d/e/1FAIpQLSc33bfPeWSRKpqvY8O0pPuLf9-BRBaUf9eg0RByqwxiw4AUqg/viewform?usp=header",
+    "form_url": "https://docs.google.com/forms/d/1uJrYAWlrQd4HFsRw7Z9mdNBSVAb39AyuQe9CQad6Wmg/edit#responses",
     "sheet_id": "1kTkoU6j7Kp4LCIkXzkVvwRU5S8vspscrSPYsL7Bw4H4",
     "sheet_gid": 1718206184,
-    "categories": []
+    "categories": [
+      "ทีมทั่วไป",
+      "ทีมรวมอายุมากกว่า 100 ปี"
+    ]
   }
 }
