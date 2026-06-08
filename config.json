@@ -1,0 +1,17 @@
+{
+  "listen_channels": [
+    "register"
+  ],
+  "individual": {
+    "form_url": "https://docs.google.com/forms/d/1dYWyTvjDsR89MAOjNZrywLUd64VwIWkLI3QZul6R8DM/edit",
+    "sheet_id": "1PRI43wyXkuagRDXvOJci9b6FOFdJRFbo3WU16HhtRf0",
+    "sheet_gid": 2109398725,
+    "categories": []
+  },
+  "team": {
+    "form_url": "https://docs.google.com/forms/d/e/1FAIpQLSc33bfPeWSRKpqvY8O0pPuLf9-BRBaUf9eg0RByqwxiw4AUqg/viewform?usp=header",
+    "sheet_id": "1kTkoU6j7Kp4LCIkXzkVvwRU5S8vspscrSPYsL7Bw4H4",
+    "sheet_gid": 1718206184,
+    "categories": []
+  }
+}
