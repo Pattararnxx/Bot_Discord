@@ -236,12 +236,9 @@ discord_user = {discord_user}
 - column ชำระ/QR/สแกน ใส่สถานะจ่ายเงิน (จ่ายแล้ว หรือ ยังไม่จ่าย)
 - column ที่ไม่มีข้อมูลใส่ -
 - ตัวเลขในวงเล็บ () หลังชื่อ = แรงค์
-- "(จ่ายแล้ว)" ติดกับชื่อใคร = การสมัครรายการนั้นของคนนั้นจ่ายแล้ว รายการอื่นของคนเดียวกันยังไม่จ่าย
+- "(จ่ายแล้ว)" ติดกับชื่อใคร = คนนั้นจ่ายแล้ว คนอื่นยังไม่จ่าย
 - ถ้าไม่ระบุสถานะ = ยังไม่จ่าย
-- ห้ามสร้างข้อมูลขึ้นมาเอง เช่น เบอร์โทร อายุ แรงค์ ถ้าไม่มีในข้อความให้ใส่ - เท่านั้น
-- ห้ามเดาหรือประมาณค่าใดๆ ทั้งสิ้น
 - ถ้าไม่เกี่ยวการสมัคร ตอบ {{"type": "unknown", "individual_rows": [], "team_rows": [], "summary": {{}}}}
-
 
 ข้อความ: {text}"""
 
@@ -277,72 +274,130 @@ async def save_entries(result: dict, config: dict) -> tuple[int, int]:
 
 
 # ========== SLASH COMMANDS ==========
-@client.tree.command(name="setup", description="ตั้งค่า Bot สำหรับการแข่งขัน")
+@client.tree.command(name="setup", description="ตั้งค่าระบบรับสมัคร — วางลิงก์ฟอร์มและชีทได้เลย")
+@app_commands.rename(
+    individual_form="ฟอร์ม-บุคคล",
+    team_form="ฟอร์ม-ทีม",
+    individual_sheet="ชีท-บุคคล",
+    team_sheet="ชีท-ทีม",
+    channel="channel"
+)
 @app_commands.describe(
-    individual_form="URL ของ Google Form สมัครบุคคล (ลิงก์ edit)",
-    team_form="URL ของ Google Form สมัครทีม (ลิงก์ edit)",
-    individual_sheet="URL ของ Google Sheet บุคคล (รวม gid)",
-    team_sheet="URL ของ Google Sheet ทีม (รวม gid)",
-    channel="ชื่อ channel ที่ Bot จะฟัง (คั่นด้วย , ถ้าหลาย channel)"
+    individual_form="วางลิงก์ Google Form สมัครบุคคล",
+    team_form="วางลิงก์ Google Form สมัครทีม",
+    individual_sheet="วางลิงก์ Google Sheet บุคคล (เปิด Sheet แท็บที่ถูกต้องแล้ว copy URL)",
+    team_sheet="วางลิงก์ Google Sheet ทีม (เปิด Sheet แท็บที่ถูกต้องแล้ว copy URL)",
+    channel="ชื่อ channel ที่บอทจะรับข้อมูล เช่น สมัครแข่ง"
 )
 async def setup(interaction: discord.Interaction, individual_form: str = None, team_form: str = None, individual_sheet: str = None, team_sheet: str = None, channel: str = None):
     await interaction.response.defer(thinking=True)
     config = load_config()
     changes = []
+
     if individual_form:
         config["individual"]["form_url"] = individual_form
         opts = await fetch_form_options(individual_form)
         config["individual"]["categories"] = opts
-        changes.append(f"✅ Form บุคคล: ดึงได้ **{len(opts)}** ตัวเลือก")
+        if opts:
+            changes.append(f"✅ **ฟอร์มบุคคล** — พบ {len(opts)} ประเภทการแข่งขัน")
+        else:
+            changes.append("⚠️ **ฟอร์มบุคคล** — บันทึกลิงก์แล้ว แต่ดึงประเภทไม่ได้ (ตรวจสอบสิทธิ์ฟอร์ม)")
+
     if team_form:
         config["team"]["form_url"] = team_form
         opts = await fetch_form_options(team_form)
         config["team"]["categories"] = opts
-        changes.append(f"✅ Form ทีม: ดึงได้ **{len(opts)}** ตัวเลือก")
+        if opts:
+            changes.append(f"✅ **ฟอร์มทีม** — พบ {len(opts)} ประเภทการแข่งขัน")
+        else:
+            changes.append("⚠️ **ฟอร์มทีม** — บันทึกลิงก์แล้ว แต่ดึงประเภทไม่ได้ (ตรวจสอบสิทธิ์ฟอร์ม)")
+
     if individual_sheet:
         sid, gid = extract_sheet_id_gid(individual_sheet)
         config["individual"]["sheet_id"] = sid
         config["individual"]["sheet_gid"] = gid
-        changes.append(f"✅ Sheet บุคคล: `{sid}` (gid={gid})")
+        changes.append(f"✅ **ชีทบุคคล** — เชื่อมต่อแล้ว")
+
     if team_sheet:
         sid, gid = extract_sheet_id_gid(team_sheet)
         config["team"]["sheet_id"] = sid
         config["team"]["sheet_gid"] = gid
-        changes.append(f"✅ Sheet ทีม: `{sid}` (gid={gid})")
+        changes.append(f"✅ **ชีทลีม** — เชื่อมต่อแล้ว")
+
     if channel:
         channels = [c.strip() for c in channel.split(",")]
         config["listen_channels"] = channels
-        changes.append(f"✅ ฟัง channel: {', '.join(channels)}")
+        ch_list = ", ".join(f"#{c}" for c in channels)
+        changes.append(f"✅ **Channel** — บอทจะรับข้อมูลใน {ch_list}")
+
     if changes:
         save_config(config)
-        await interaction.followup.send("**⚙️ บันทึก config แล้ว**\n" + "\n".join(changes))
+        msg = "## ⚙️ ตั้งค่าสำเร็จ\n" + "\n".join(changes)
+        msg += "\n\n> ใช้ `/ดูการตั้งค่า` เพื่อตรวจสอบการตั้งค่าทั้งหมด"
+        await interaction.followup.send(msg)
     else:
-        await interaction.followup.send("❌ ไม่ได้ระบุอะไรเลย")
+        msg = (
+            "## ❓ วิธีใช้ `/setup`\n"
+            "ใส่อย่างน้อย 1 อย่างต่อไปนี้\n\n"
+            "**`individual_form`** — ลิงก์ฟอร์มสมัครบุคคล\n"
+            "**`team_form`** — ลิงก์ฟอร์มสมัครทีม\n"
+            "**`individual_sheet`** — ลิงก์ชีทบุคคล\n"
+            "**`team_sheet`** — ลิงก์ชีทลีม\n"
+            "**`channel`** — ชื่อ channel เช่น `สมัครแข่ง`"
+        )
+        await interaction.followup.send(msg)
 
-@client.tree.command(name="config", description="ดู config ปัจจุบัน")
+@client.tree.command(name="ดูการตั้งค่า", description="ดูการตั้งค่าระบบรับสมัครทั้งหมด")
 async def show_config(interaction: discord.Interaction):
     config = load_config()
     ind = config["individual"]
     team = config["team"]
     channels = config.get("listen_channels", [])
-    lines = ["**⚙️ Config ปัจจุบัน**\n"]
-    lines.append(f"📢 ฟัง channel: {', '.join(channels) if channels else '(ยังไม่ตั้ง)'}")
-    lines.append(f"\n👤 **บุคคล**")
-    lines.append(f"• Sheet: `{ind['sheet_id'] or '(ยังไม่ตั้ง)'}` gid={ind['sheet_gid']}")
-    lines.append(f"• ตัวเลือกประเภท: {len(ind['categories'])} รายการ")
+
+    def status(val): return "✅" if val else "❌"
+    def ch_fmt(val): return ", ".join(f"#{c}" for c in val) if val else "ยังไม่ได้ตั้ง"
+
+    lines = ["## ⚙️ การตั้งค่าระบบรับสมัคร\n"]
+
+    # Channel
+    lines.append(f"📢 **รับข้อมูลใน:** {ch_fmt(channels)}")
+
+    # บุคคล
+    lines.append(f"\n👤 **ฟอร์มบุคคล**")
+    lines.append(f"{status(ind['form_url'])} ฟอร์ม: {'เชื่อมแล้ว' if ind['form_url'] else 'ยังไม่ได้ตั้ง'}")
+    lines.append(f"{status(ind['sheet_id'])} ชีท: {'เชื่อมแล้ว' if ind['sheet_id'] else 'ยังไม่ได้ตั้ง'}")
     if ind["categories"]:
-        lines.append("\n".join(f"  - {c}" for c in ind["categories"]))
-    lines.append(f"\n🏓 **ทีม**")
-    lines.append(f"• Sheet: `{team['sheet_id'] or '(ยังไม่ตั้ง)'}` gid={team['sheet_gid']}")
-    lines.append(f"• ตัวเลือกประเภท: {len(team['categories'])} รายการ")
+        lines.append(f"📋 ประเภทที่รู้จัก {len(ind['categories'])} รายการ:")
+        lines.append("\n".join(f"  • {c}" for c in ind["categories"]))
+    else:
+        lines.append("📋 ยังไม่มีประเภทการแข่งขัน (ใช้ `/setup individual_form` เพื่อดึงข้อมูล)")
+
+    # ทีม
+    lines.append(f"\n🏓 **ฟอร์มทีม**")
+    lines.append(f"{status(team['form_url'])} ฟอร์ม: {'เชื่อมแล้ว' if team['form_url'] else 'ยังไม่ได้ตั้ง'}")
+    lines.append(f"{status(team['sheet_id'])} ชีท: {'เชื่อมแล้ว' if team['sheet_id'] else 'ยังไม่ได้ตั้ง'}")
     if team["categories"]:
-        lines.append("\n".join(f"  - {c}" for c in team["categories"]))
-    # แสดง AI providers ที่ใช้งานได้
-    providers_str = " → ".join(f"{p['type']}:{p['model'].split('-')[0]}" for p in AI_PROVIDERS)
-    lines.append(f"\n🤖 AI fallback: {providers_str}")
+        lines.append(f"📋 ประเภทที่รู้จัก {len(team['categories'])} รายการ:")
+        lines.append("\n".join(f"  • {c}" for c in team["categories"]))
+    else:
+        lines.append("📋 ยังไม่มีประเภทการแข่งขัน")
+
+    # คำแนะนำถ้ายังไม่ครบ
+    missing = []
+    if not ind["form_url"]: missing.append("`individual_form`")
+    if not ind["sheet_id"]: missing.append("`individual_sheet`")
+    if not team["form_url"]: missing.append("`team_form`")
+    if not team["sheet_id"]: missing.append("`team_sheet`")
+    if not channels: missing.append("`channel`")
+
+    if missing:
+        lines.append(f"\n> ⚠️ ยังขาด: {', '.join(missing)} — ใช้ `/setup` เพื่อตั้งค่า")
+    else:
+        lines.append("\n> 🟢 ตั้งค่าครบแล้ว พร้อมรับสมัครได้เลย!")
+
     await interaction.response.send_message("\n".join(lines))
 
-@client.tree.command(name="reload_form", description="ดึง options จาก Form ใหม่อีกครั้ง")
+@client.tree.command(name="อัปเดตฟอร์ม", description="ดึงประเภทการแข่งขันจากฟอร์มใหม่ — ใช้เมื่อเพิ่มประเภทใหม่ในฟอร์ม")
 async def reload_form(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     config = load_config()
@@ -350,22 +405,26 @@ async def reload_form(interaction: discord.Interaction):
     if config["individual"]["form_url"]:
         opts = await fetch_form_options(config["individual"]["form_url"])
         config["individual"]["categories"] = opts
-        results.append(f"✅ Form บุคคล: ดึงได้ **{len(opts)}** ตัวเลือก")
+        results.append(f"✅ ฟอร์มบุคคล — พบ **{len(opts)}** ประเภทการแข่งขัน")
     else:
-        results.append("❌ ยังไม่ได้ตั้ง Form บุคคล")
+        results.append("❌ ยังไม่ได้ตั้งค่าฟอร์มบุคคล — ใช้ `/setup individual_form` ก่อน")
     if config["team"]["form_url"]:
         opts = await fetch_form_options(config["team"]["form_url"])
         config["team"]["categories"] = opts
-        results.append(f"✅ Form ทีม: ดึงได้ **{len(opts)}** ตัวเลือก")
+        results.append(f"✅ ฟอร์มทีม — พบ **{len(opts)}** ประเภทการแข่งขัน")
     else:
-        results.append("❌ ยังไม่ได้ตั้ง Form ทีม")
+        results.append("❌ ยังไม่ได้ตั้งค่าฟอร์มทีม — ใช้ `/setup team_form` ก่อน")
     save_config(config)
-    await interaction.followup.send("\n".join(results))
+    await interaction.followup.send("## 🔄 อัปเดตฟอร์มแล้ว\n" + "\n".join(results))
 
-@client.tree.command(name="reset_config", description="รีเซ็ต config ทั้งหมด")
+@client.tree.command(name="รีเซ็ต", description="ล้างการตั้งค่าทั้งหมดและเริ่มใหม่")
 async def reset_config(interaction: discord.Interaction):
     save_config(dict(DEFAULT_CONFIG))
-    await interaction.response.send_message("♻️ รีเซ็ต config เรียบร้อยแล้ว")
+    await interaction.response.send_message(
+        "## ♻️ ล้างการตั้งค่าแล้ว\n"
+        "การตั้งค่าทั้งหมดถูกลบเรียบร้อย\n\n"
+        "> ใช้ `/setup` เพื่อตั้งค่าใหม่ได้เลย"
+    )
 
 @client.event
 async def on_ready():
@@ -416,8 +475,6 @@ async def on_message(message: discord.Message):
     discord_user = str(message.author)
 
     async with message.channel.typing():
-        placeholder = await message.reply("⏳ กำลังประมวลผล...")
-
         result = await process_message(
             text or "(ดูจากรูปภาพ)",
             image_data,
@@ -430,14 +487,13 @@ async def on_message(message: discord.Message):
         )
 
     if result.get("type") == "unknown":
-        await placeholder.delete()
         return
 
     individual_count, team_count = await save_entries(result, config)
 
     # สร้าง reply จาก summary
     summary = result.get("summary", {})
-    lines = ["✅ **บันทึกข้อมูลแล้ว**"]
+    lines = ["## ✅ บันทึกข้อมูลแล้ว"]
 
     ind_entries = summary.get("individual_entries", [])
     if ind_entries:
