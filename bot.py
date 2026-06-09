@@ -14,16 +14,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ========== CONSTANTS ==========
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
 CONFIG_FILE = "config.json"
-
-GEMINI_MODELS = [
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-]
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -39,13 +34,11 @@ class PingPongBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-
     async def setup_hook(self):
         await self.tree.sync()
 
 client = PingPongBot()
 
-# ========== CONFIG ==========
 DEFAULT_CONFIG = {
     "listen_channels": [],
     "individual": {"form_url": "", "sheet_id": "", "sheet_gid": 0, "categories": []},
@@ -69,52 +62,36 @@ def extract_sheet_id_gid(url: str) -> tuple[str, int]:
     gid = int(gid_match.group(1)) if gid_match else 0
     return sheet_id, gid
 
-# ========== FORMS API ==========
 async def fetch_form_options(form_url: str) -> list[str]:
-    """ดึง dropdown options จาก Google Forms API"""
     try:
-        # แยก Form ID จาก URL (รองรับทั้ง /d/ID และ /d/e/ID)
         match = re.search(r'/forms/d/(?:e/)?([a-zA-Z0-9_-]+)', form_url)
         if not match:
-            print("ไม่เจอ Form ID ใน URL")
             return []
         form_id = match.group(1)
-
-        # Refresh token
         request = google.auth.transport.requests.Request()
         creds.refresh(request)
-
         api_url = f"https://forms.googleapis.com/v1/forms/{form_id}"
         headers = {"Authorization": f"Bearer {creds.token}"}
-
         async with httpx.AsyncClient(timeout=15) as hc:
             resp = await hc.get(api_url, headers=headers)
-
         print(f"Forms API [{form_id}] status: {resp.status_code}")
-
         if resp.status_code != 200:
             print(f"Forms API error: {resp.text[:300]}")
             return []
-
         data = resp.json()
         options = []
         for item in data.get("items", []):
             question = item.get("questionItem", {}).get("question", {})
-            choice_q = question.get("choiceQuestion", {})
-            for opt in choice_q.get("options", []):
+            for opt in question.get("choiceQuestion", {}).get("options", []):
                 val = opt.get("value", "").strip()
                 if val:
                     options.append(val)
-
         print(f"ดึงได้ {len(options)} ตัวเลือก: {options[:3]}")
         return options
     except Exception as e:
-        import traceback
         print(f"Form fetch error: {e}")
-        traceback.print_exc()
         return []
 
-# ========== SHEET HELPERS ==========
 def _get_worksheet(sheet_id: str, gid: int):
     sh = gc.open_by_key(sheet_id)
     for ws in sh.worksheets():
@@ -130,157 +107,174 @@ def _save_rows(sheet_id: str, gid: int, rows: list):
     ws = _get_worksheet(sheet_id, gid)
     for row in rows:
         ws.append_row(row)
-    return len(rows)
 
-# ========== GEMINI ==========
-async def call_gemini(prompt: str, image_data: bytes = None) -> str:
-    parts = [{"text": prompt}]
-    if image_data:
-        b64 = base64.b64encode(image_data).decode()
-        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
-    payload = {"contents": [{"parts": parts}]}
-    
-    for model in GEMINI_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+# ========== AI PROVIDERS ==========
+# เรียงลำดับ: Groq ก่อน (เร็ว+ฟรี 30RPM) แล้วค่อย Gemini
+AI_PROVIDERS = []
+
+if GROQ_API_KEY:
+    AI_PROVIDERS += [
+        {"type": "groq", "model": "llama-3.3-70b-versatile"},
+        {"type": "groq", "model": "llama3-8b-8192"},
+    ]
+
+AI_PROVIDERS += [
+    {"type": "gemini", "model": "gemini-2.5-flash-lite"},
+    {"type": "gemini", "model": "gemini-2.5-flash"},
+]
+
+async def call_ai(prompt: str, image_data: bytes = None) -> str:
+    """เรียก AI โดยลอง provider ตามลำดับ ถ้า rate limit ก็สลับไปตัวถัดไป"""
+    for provider in AI_PROVIDERS:
         try:
-            async with httpx.AsyncClient(timeout=30) as hc:
-                resp = await hc.post(url, json=payload)
+            if provider["type"] == "groq":
+                # Groq ไม่รองรับรูปภาพ ข้ามถ้ามีรูป
+                if image_data:
+                    continue
+                url = "https://api.groq.com/openai/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": provider["model"],
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1
+                }
+                async with httpx.AsyncClient(timeout=30) as hc:
+                    resp = await hc.post(url, headers=headers, json=payload)
                 if resp.status_code == 429:
-                    print(f"{model} rate limited, trying next...")
+                    print(f"Groq {provider['model']} rate limited, trying next...")
+                    continue
+                resp.raise_for_status()
+                result = resp.json()
+                text = result["choices"][0]["message"]["content"].strip()
+                print(f"✓ ใช้ Groq {provider['model']}")
+                return text
+
+            elif provider["type"] == "gemini":
+                parts = [{"text": prompt}]
+                if image_data:
+                    b64 = base64.b64encode(image_data).decode()
+                    parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
+                payload = {"contents": [{"parts": parts}]}
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{provider['model']}:generateContent?key={GEMINI_API_KEY}"
+                async with httpx.AsyncClient(timeout=30) as hc:
+                    resp = await hc.post(url, json=payload)
+                if resp.status_code == 429:
+                    print(f"Gemini {provider['model']} rate limited, trying next...")
                     await asyncio.sleep(1)
                     continue
                 resp.raise_for_status()
                 result = resp.json()
-                return result["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except Exception as e:
-            print(f"{model} error: {e}, trying next...")
-            continue
-    
-    raise Exception("ทุก model rate limited หมดแล้ว")
+                text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                print(f"✓ ใช้ Gemini {provider['model']}")
+                return text
 
-async def analyze_message(text: str, image_data: bytes = None, individual_options: list = None, team_options: list = None) -> dict:
+        except Exception as e:
+            print(f"{provider['type']} {provider['model']} error: {e}, trying next...")
+            continue
+
+    raise Exception("ทุก AI provider rate limited หมดแล้ว")
+
+
+# ========== 1 CALL ANALYZE + MAP ==========
+async def process_message(
+    text: str,
+    image_data: bytes,
+    ind_headers: list,
+    team_headers: list,
+    ind_options: list,
+    team_options: list,
+    timestamp: str,
+    discord_user: str
+) -> dict:
+    """รวม analyze + map เป็น 1 call เดียว"""
+
     ind_opts = ""
-    if individual_options:
-        opts_str = "\n".join(f"- {o}" for o in individual_options)
-        ind_opts = f"\nสำหรับประเภทบุคคล ให้เลือกจากตัวเลือกนี้เท่านั้น (เลือกที่ตรงที่สุด):\n{opts_str}\n"
+    if ind_options:
+        ind_opts = "\nตัวเลือกประเภทบุคคล (เลือกที่ตรงที่สุด):\n" + "\n".join(f"- {o}" for o in ind_options)
 
     team_opts = ""
     if team_options:
-        opts_str = "\n".join(f"- {o}" for o in team_options)
-        team_opts = f"\nสำหรับประเภททีม ให้เลือกจากตัวเลือกนี้เท่านั้น (เลือกที่ตรงที่สุด):\n{opts_str}\n"
+        team_opts = "\nตัวเลือกประเภททีม (เลือกที่ตรงที่สุด):\n" + "\n".join(f"- {o}" for o in team_options)
 
-    prompt = f"""คุณเป็น AI ช่วยแยกข้อมูลการสมัครแข่งขันปิงปอง ตอบกลับเป็น JSON เท่านั้น
+    prompt = f"""คุณเป็น AI ช่วยแยกข้อมูลการสมัครแข่งขันปิงปองและกรอกลง Google Sheet
 
+ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่น
+
+Headers ของ Sheet บุคคล: {json.dumps(ind_headers, ensure_ascii=False)}
+Headers ของ Sheet ทีม: {json.dumps(team_headers, ensure_ascii=False)}
+
+timestamp = {timestamp}
+discord_user = {discord_user}
+{ind_opts}
+{team_opts}
+
+รูปแบบคำตอบ:
 {{
   "type": "individual" หรือ "team" หรือ "mixed" หรือ "unknown",
-  "payment_status": "จ่ายแล้ว" หรือ "ยังไม่จ่าย",
-  "individual_entries": [
-    {{
-      "ชื่อ": "ชื่อ-นามสกุล",
-      "ประเภท": "รุ่นที่สมัคร",
-      "แรงค์": "ตัวเลข หรือ - ถ้าไม่มี",
-      "สังกัด": "สังกัด หรือ -",
-      "เบอร์": "เบอร์โทร หรือ -",
-      "payment_status": "จ่ายแล้ว หรือ ยังไม่จ่าย (ระดับบุคคล)"
-    }}
+  "individual_rows": [
+    ["ค่า col1", "ค่า col2", ...]
   ],
-  "team_entries": [
-    {{
-      "ชื่อทีม": "ชื่อทีม",
-      "ประเภท": "ประเภททีม",
-      "เบอร์": "เบอร์ติดต่อ หรือ -",
-      "ผู้เล่น": [
-        {{"ชื่อ": "ชื่อผู้เล่น", "แรงค์": "แรงค์ หรือ -", "อายุ": "อายุ หรือ -"}}
-      ]
-    }}
+  "team_rows": [
+    ["ค่า col1", "ค่า col2", ...]
   ],
-  "notes": "หมายเหตุ"
+  "summary": {{
+    "individual_entries": [
+      {{"ชื่อ": "...", "ประเภท": "...", "แรงค์": "...", "payment_status": "จ่ายแล้ว หรือ ยังไม่จ่าย"}}
+    ],
+    "team_entries": [
+      {{"ชื่อทีม": "...", "ประเภท": "...", "payment_status": "จ่ายแล้ว หรือ ยังไม่จ่าย", "ผู้เล่น": []}}
+    ]
+  }}
 }}
 
 กฎ:
+- กรอกข้อมูลลง array ให้ตรงตาม Headers ที่ให้ไว้ทุก column
+- column timestamp/ประทับเวลา ใส่ค่า timestamp ที่ให้มา
+- column ชำระ/QR/สแกน ใส่สถานะจ่ายเงิน (จ่ายแล้ว หรือ ยังไม่จ่าย)
+- column ที่ไม่มีข้อมูลใส่ -
 - ตัวเลขในวงเล็บ () หลังชื่อ = แรงค์
-- "(จ่ายแล้ว)" หรือ "(จ่ายแล้ว)" ที่อยู่ติดกับชื่อใคร = คนนั้นจ่ายแล้ว คนอื่นยังไม่จ่าย
-- ถ้าระบุ "ยังไม่จ่าย" หรือ "ค้างจ่าย" รวมๆ = ทุกคนยังไม่จ่าย
-- ถ้าระบุ "จ่ายแล้ว" รวมๆ (ไม่ติดกับชื่อใด) = ทุกคนจ่ายแล้ว
-- ถ้าไม่ระบุเลย = ยังไม่จ่าย
-- payment_status ให้ใส่ระดับ entry ด้วยถ้าแต่ละคนจ่ายไม่เหมือนกัน
-- ถ้าไม่เกี่ยวการสมัคร ตอบ {{"type": "unknown"}}
-{ind_opts}{team_opts}
+- "(จ่ายแล้ว)" ติดกับชื่อใคร = การสมัครรายการนั้นของคนนั้นจ่ายแล้ว รายการอื่นของคนเดียวกันยังไม่จ่าย
+- ถ้าไม่ระบุสถานะ = ยังไม่จ่าย
+- ห้ามสร้างข้อมูลขึ้นมาเอง เช่น เบอร์โทร อายุ แรงค์ ถ้าไม่มีในข้อความให้ใส่ - เท่านั้น
+- ห้ามเดาหรือประมาณค่าใดๆ ทั้งสิ้น
+- ถ้าไม่เกี่ยวการสมัคร ตอบ {{"type": "unknown", "individual_rows": [], "team_rows": [], "summary": {{}}}}
+
+
 ข้อความ: {text}"""
 
     try:
-        raw = await call_gemini(prompt, image_data)
+        raw = await call_ai(prompt, image_data)
         raw = re.sub(r"```json|```", "", raw).strip()
         return json.loads(raw)
     except Exception as e:
-        print(f"Gemini analyze error: {e}")
-        return {"type": "unknown"}
+        print(f"AI process error: {e}")
+        return {"type": "unknown", "individual_rows": [], "team_rows": [], "summary": {}}
 
-async def map_to_headers(entry: dict, headers: list, meta: dict) -> list:
-    prompt = f"""กรอกข้อมูลลง Google Sheet
-
-Headers (เรียงตาม column):
-{json.dumps(headers, ensure_ascii=False)}
-
-ข้อมูล:
-{json.dumps(entry, ensure_ascii=False)}
-
-เพิ่มเติม: timestamp={meta['timestamp']}, สถานะจ่าย={meta['payment_status']}, Discord={meta['discord_user']}
-
-ตอบเป็น JSON array ตามลำดับ column เท่านั้น เช่น ["ค่า1","ค่า2"]
-- column timestamp/ประทับเวลา ใส่ค่า timestamp
-- column ชำระ/QR/สแกน ใส่สถานะจ่ายเงิน
-- ไม่มีข้อมูลใส่ -"""
-    try:
-        raw = await call_gemini(prompt)
-        raw = re.sub(r"```json|```", "", raw).strip()
-        row = json.loads(raw)
-        if isinstance(row, list):
-            while len(row) < len(headers):
-                row.append("-")
-            return row[:len(headers)]
-    except Exception as e:
-        print(f"Gemini map error: {e}")
-    return ["-"] * len(headers)
 
 # ========== SAVE ==========
-async def save_entries(data: dict, discord_user: str, config: dict) -> tuple[int, int]:
-
-    payment_status = data.get("payment_status")
-
-    if payment_status not in ["จ่ายแล้ว", "ยังไม่จ่าย"]:
-        payment_status = "ยังไม่จ่าย"
-
-    meta = {
-        "timestamp": datetime.now().strftime("%d/%m/%Y, %H:%M:%S"),
-        "payment_status": payment_status,
-        "discord_user": discord_user,
-    }
-
+async def save_entries(result: dict, config: dict) -> tuple[int, int]:
     individual_count = 0
     team_count = 0
 
-    if data.get("individual_entries") and config["individual"]["sheet_id"]:
-        ws, headers = await asyncio.to_thread(_get_headers, config["individual"]["sheet_id"], config["individual"]["sheet_gid"])
-        rows = []
-        for e in data["individual_entries"]:
-            # ใช้ payment_status ระดับบุคคลถ้ามี ไม่งั้นใช้ระดับ message
-            entry_meta = dict(meta)
-            if e.get("payment_status"):
-                entry_meta["payment_status"] = e.pop("payment_status")
-            rows.append(await map_to_headers(e, headers, entry_meta))
-        if rows:
-            await asyncio.to_thread(_save_rows, config["individual"]["sheet_id"], config["individual"]["sheet_gid"], rows)
-            individual_count = len(rows)
+    ind_rows = result.get("individual_rows", [])
+    if ind_rows and config["individual"]["sheet_id"]:
+        await asyncio.to_thread(
+            _save_rows, config["individual"]["sheet_id"], config["individual"]["sheet_gid"], ind_rows
+        )
+        individual_count = len(ind_rows)
 
-    if data.get("team_entries") and config["team"]["sheet_id"]:
-        ws, headers = await asyncio.to_thread(_get_headers, config["team"]["sheet_id"], config["team"]["sheet_gid"])
-        rows = [await map_to_headers(t, headers, meta) for t in data["team_entries"]]
-        if rows:
-            await asyncio.to_thread(_save_rows, config["team"]["sheet_id"], config["team"]["sheet_gid"], rows)
-            team_count = len(rows)
+    team_rows = result.get("team_rows", [])
+    if team_rows and config["team"]["sheet_id"]:
+        await asyncio.to_thread(
+            _save_rows, config["team"]["sheet_id"], config["team"]["sheet_gid"], team_rows
+        )
+        team_count = len(team_rows)
 
     return individual_count, team_count
+
 
 # ========== SLASH COMMANDS ==========
 @client.tree.command(name="setup", description="ตั้งค่า Bot สำหรับการแข่งขัน")
@@ -295,36 +289,30 @@ async def setup(interaction: discord.Interaction, individual_form: str = None, t
     await interaction.response.defer(thinking=True)
     config = load_config()
     changes = []
-
     if individual_form:
         config["individual"]["form_url"] = individual_form
         opts = await fetch_form_options(individual_form)
         config["individual"]["categories"] = opts
         changes.append(f"✅ Form บุคคล: ดึงได้ **{len(opts)}** ตัวเลือก")
-
     if team_form:
         config["team"]["form_url"] = team_form
         opts = await fetch_form_options(team_form)
         config["team"]["categories"] = opts
         changes.append(f"✅ Form ทีม: ดึงได้ **{len(opts)}** ตัวเลือก")
-
     if individual_sheet:
         sid, gid = extract_sheet_id_gid(individual_sheet)
         config["individual"]["sheet_id"] = sid
         config["individual"]["sheet_gid"] = gid
         changes.append(f"✅ Sheet บุคคล: `{sid}` (gid={gid})")
-
     if team_sheet:
         sid, gid = extract_sheet_id_gid(team_sheet)
         config["team"]["sheet_id"] = sid
         config["team"]["sheet_gid"] = gid
         changes.append(f"✅ Sheet ทีม: `{sid}` (gid={gid})")
-
     if channel:
         channels = [c.strip() for c in channel.split(",")]
         config["listen_channels"] = channels
         changes.append(f"✅ ฟัง channel: {', '.join(channels)}")
-
     if changes:
         save_config(config)
         await interaction.followup.send("**⚙️ บันทึก config แล้ว**\n" + "\n".join(changes))
@@ -349,6 +337,9 @@ async def show_config(interaction: discord.Interaction):
     lines.append(f"• ตัวเลือกประเภท: {len(team['categories'])} รายการ")
     if team["categories"]:
         lines.append("\n".join(f"  - {c}" for c in team["categories"]))
+    # แสดง AI providers ที่ใช้งานได้
+    providers_str = " → ".join(f"{p['type']}:{p['model'].split('-')[0]}" for p in AI_PROVIDERS)
+    lines.append(f"\n🤖 AI fallback: {providers_str}")
     await interaction.response.send_message("\n".join(lines))
 
 @client.tree.command(name="reload_form", description="ดึง options จาก Form ใหม่อีกครั้ง")
@@ -376,13 +367,14 @@ async def reset_config(interaction: discord.Interaction):
     save_config(dict(DEFAULT_CONFIG))
     await interaction.response.send_message("♻️ รีเซ็ต config เรียบร้อยแล้ว")
 
-# ========== ON MESSAGE ==========
 @client.event
 async def on_ready():
     print(f"✅ Bot พร้อมใช้งาน: {client.user}")
     config = load_config()
     channels = config.get("listen_channels", [])
     print(f"🎯 ฟัง channel: {channels if channels else '(ยังไม่ตั้ง)'}")
+    providers = " → ".join(f"{p['type']}:{p['model']}" for p in AI_PROVIDERS)
+    print(f"🤖 AI providers: {providers}")
 
 @client.event
 async def on_message(message: discord.Message):
@@ -409,34 +401,65 @@ async def on_message(message: discord.Message):
     if not text and not image_data:
         return
 
-    async with message.channel.typing():
-        data = await analyze_message(
-            text or "(ดูจากรูปภาพ)", image_data,
-            config["individual"].get("categories"),
-            config["team"].get("categories")
+    # ดึง headers จาก Sheet ทั้งสอง
+    ind_headers, team_headers = [], []
+    if config["individual"]["sheet_id"]:
+        _, ind_headers = await asyncio.to_thread(
+            _get_headers, config["individual"]["sheet_id"], config["individual"]["sheet_gid"]
+        )
+    if config["team"]["sheet_id"]:
+        _, team_headers = await asyncio.to_thread(
+            _get_headers, config["team"]["sheet_id"], config["team"]["sheet_gid"]
         )
 
-    if data.get("type") == "unknown":
+    timestamp = datetime.now().strftime("%d/%m/%Y, %H:%M:%S")
+    discord_user = str(message.author)
+
+    async with message.channel.typing():
+        placeholder = await message.reply("⏳ กำลังประมวลผล...")
+
+        result = await process_message(
+            text or "(ดูจากรูปภาพ)",
+            image_data,
+            ind_headers,
+            team_headers,
+            config["individual"].get("categories", []),
+            config["team"].get("categories", []),
+            timestamp,
+            discord_user
+        )
+
+    if result.get("type") == "unknown":
+        await placeholder.delete()
         return
 
-    individual_count, team_count = await save_entries(data, str(message.author), config)
+    individual_count, team_count = await save_entries(result, config)
 
+    # สร้าง reply จาก summary
+    summary = result.get("summary", {})
     lines = ["✅ **บันทึกข้อมูลแล้ว**"]
-    status_emoji = "💰" if data.get("payment_status") == "จ่ายแล้ว" else "⏳"
-    lines.append(f"{status_emoji} สถานะ: {data.get('payment_status', 'ยังไม่จ่าย')}")
-    if data.get("individual_entries"):
+
+    ind_entries = summary.get("individual_entries", [])
+    if ind_entries:
         lines.append(f"\n👤 **รายชื่อบุคคล ({individual_count} คน)**")
-        for e in data["individual_entries"]:
-            lines.append(f"• {e.get('ชื่อ','')} — {e.get('ประเภท','')} (แรงค์: {e.get('แรงค์','-')})")
-    if data.get("team_entries"):
+        for e in ind_entries:
+            ps = e.get("payment_status", "ยังไม่จ่าย")
+            emoji = "💰" if ps == "จ่ายแล้ว" else "⏳"
+            lines.append(f"{emoji} {e.get('ชื่อ','')} — {e.get('ประเภท','')} (แรงค์: {e.get('แรงค์','-')})")
+
+    team_entries = summary.get("team_entries", [])
+    if team_entries:
         lines.append(f"\n🏓 **ทีม ({team_count} ทีม)**")
-        for t in data["team_entries"]:
-            lines.append(f"• {t.get('ชื่อทีม','')} — {t.get('ประเภท','')}")
+        for t in team_entries:
+            ps = t.get("payment_status", "ยังไม่จ่าย")
+            emoji = "💰" if ps == "จ่ายแล้ว" else "⏳"
+            lines.append(f"{emoji} {t.get('ชื่อทีม','')} — {t.get('ประเภท','')}")
             for p in t.get("ผู้เล่น", []):
-                if p.get("ชื่อ", "-") != "-":
-                    lines.append(f"  └ {p['ชื่อ']} (แรงค์: {p.get('แรงค์','-')})")
-    if data.get("notes"):
-        lines.append(f"\n📝 {data['notes']}")
+                if isinstance(p, dict):
+                    if p.get("ชื่อ", "-") != "-":
+                        lines.append(f"  └ {p['ชื่อ']} (แรงค์: {p.get('แรงค์','-')})")
+                elif isinstance(p, str) and p and p != "-":
+                    lines.append(f"  └ {p}")
 
     await message.reply("\n".join(lines))
 
