@@ -24,7 +24,16 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/forms.body.readonly"
 ]
-creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+
+# รองรับทั้ง local (ไฟล์ JSON) และ Render (environment variable)
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+if GOOGLE_CREDENTIALS_JSON:
+    import io
+    from google.oauth2.service_account import Credentials as SACredentials
+    creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
+    creds = SACredentials.from_service_account_info(creds_info, scopes=SCOPES)
+else:
+    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 gc = gspread.authorize(creds)
 
 intents = discord.Intents.default()
