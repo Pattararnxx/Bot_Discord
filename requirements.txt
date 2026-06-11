@@ -1,7 +1,8 @@
-discord.py==2.3.2
-google-generativeai==0.7.2
-gspread==6.1.2
-google-auth==2.29.0
-Pillow==10.3.0
-httpx==0.27.0
-python-dotenv==1.0.1
+discord.py
+google-generativeai
+gspread
+google-auth
+google-auth-httplib2
+Pillow
+httpx
+python-dotenv
