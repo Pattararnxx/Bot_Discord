@@ -119,6 +119,107 @@ def _save_rows(sheet_id: str, gid: int, rows: list):
     for row in rows:
         ws.append_row(row)
  
+ 
+# ========== EDIT / UPDATE HELPERS ==========
+def _find_and_update(sheet_id: str, gid: int, search_column: str, search_value: str,
+                      updates: dict) -> dict:
+    """
+    ค้นหาแถวที่คอลัมน์ search_column มีค่าตรง (หรือคล้าย) กับ search_value
+    แล้วอัปเดตค่าตามที่ระบุใน updates = {column_name: new_value}
+ 
+    คืนค่า dict: {
+      "found": bool,
+      "row_index": int หรือ None,
+      "old_row": list หรือ None,
+      "new_row": list หรือ None,
+      "updated_columns": list,
+      "matches": int  (จำนวนแถวที่ตรงทั้งหมด ถ้า > 1 จะไม่อัปเดตและคืน matches)
+    }
+    """
+    ws = _get_worksheet(sheet_id, gid)
+    all_values = ws.get_all_values()
+    if not all_values:
+        return {"found": False, "row_index": None, "old_row": None,
+                "new_row": None, "updated_columns": [], "matches": 0}
+ 
+    headers = all_values[0]
+ 
+    def norm(s):
+        return str(s).strip().lower()
+ 
+    # หา index ของคอลัมน์ค้นหา (รองรับ partial match ของชื่อคอลัมน์)
+    search_col_idx = None
+    for i, h in enumerate(headers):
+        if norm(h) == norm(search_column):
+            search_col_idx = i
+            break
+    if search_col_idx is None:
+        for i, h in enumerate(headers):
+            if norm(search_column) in norm(h) or norm(h) in norm(search_column):
+                search_col_idx = i
+                break
+    if search_col_idx is None:
+        return {"found": False, "row_index": None, "old_row": None,
+                "new_row": None, "updated_columns": [], "matches": 0}
+ 
+    # หาแถวที่ตรงกับค่าค้นหา (รองรับ partial/contains match)
+    candidates = []
+    for r_idx in range(1, len(all_values)):
+        row = all_values[r_idx]
+        if len(row) <= search_col_idx:
+            continue
+        cell_val = row[search_col_idx]
+        if norm(search_value) == norm(cell_val) or norm(search_value) in norm(cell_val) or norm(cell_val) in norm(search_value):
+            candidates.append(r_idx)
+ 
+    if len(candidates) == 0:
+        return {"found": False, "row_index": None, "old_row": None,
+                "new_row": None, "updated_columns": [], "matches": 0}
+    if len(candidates) > 1:
+        # มีหลายแถวตรง — ไม่อัปเดต ให้ผู้ใช้ระบุให้ชัดเจนขึ้น
+        return {"found": False, "row_index": None, "old_row": None,
+                "new_row": None, "updated_columns": [], "matches": len(candidates)}
+ 
+    r_idx = candidates[0]
+    row = list(all_values[r_idx])
+    # ขยาย row ให้ครบความยาว headers
+    while len(row) < len(headers):
+        row.append("")
+ 
+    old_row = list(row)
+    updated_columns = []
+ 
+    for col_name, new_val in updates.items():
+        col_idx = None
+        for i, h in enumerate(headers):
+            if norm(h) == norm(col_name):
+                col_idx = i
+                break
+        if col_idx is None:
+            for i, h in enumerate(headers):
+                if norm(col_name) in norm(h) or norm(h) in norm(col_name):
+                    col_idx = i
+                    break
+        if col_idx is None:
+            continue
+        row[col_idx] = str(new_val)
+        updated_columns.append(headers[col_idx])
+ 
+    if updated_columns:
+        # gspread row index ใน sheet = r_idx + 1 (1-based, header = row 1)
+        sheet_row_num = r_idx + 1
+        ws.update(f"A{sheet_row_num}", [row])
+ 
+    return {
+        "found": True,
+        "row_index": r_idx + 1,
+        "old_row": old_row,
+        "new_row": row,
+        "updated_columns": updated_columns,
+        "matches": 1
+    }
+ 
+ 
 # ========== AI PROVIDERS ==========
 # เรียงลำดับ: Groq ก่อน (เร็ว+ฟรี 30RPM) แล้วค่อย Gemini
 AI_PROVIDERS = []
@@ -200,7 +301,7 @@ async def process_message(
     timestamp: str,
     discord_user: str
 ) -> dict:
-    """รวม analyze + map เป็น 1 call เดียว"""
+    """รวม analyze + map เป็น 1 call เดียว — รองรับทั้งสมัครใหม่ และแก้ไขข้อมูลเดิม"""
  
     ind_opts = ""
     if ind_options:
@@ -210,7 +311,7 @@ async def process_message(
     if team_options:
         team_opts = "\nตัวเลือกประเภททีม (เลือกที่ตรงที่สุด):\n" + "\n".join(f"- {o}" for o in team_options)
  
-    prompt = f"""คุณเป็น AI ช่วยแยกข้อมูลการสมัครแข่งขันปิงปองและกรอกลง Google Sheet
+    prompt = f"""คุณเป็น AI ช่วยแยกข้อมูลการสมัครแข่งขันปิงปองและกรอกลง Google Sheet หรือแก้ไขข้อมูลที่มีอยู่แล้ว
  
 ตอบกลับเป็น JSON เท่านั้น ห้ามมีข้อความอื่น
  
@@ -224,12 +325,22 @@ discord_user = {discord_user}
  
 รูปแบบคำตอบ:
 {{
-  "type": "individual" หรือ "team" หรือ "mixed" หรือ "unknown",
+  "type": "individual" หรือ "team" หรือ "mixed" หรือ "edit" หรือ "unknown",
   "individual_rows": [
     ["ค่า col1", "ค่า col2", ...]
   ],
   "team_rows": [
     ["ค่า col1", "ค่า col2", ...]
+  ],
+  "edit_actions": [
+    {{
+      "sheet": "individual" หรือ "team",
+      "search_column": "ชื่อ header คอลัมน์ที่ใช้ค้นหา เช่น ชื่อ หรือ ชื่อทีม",
+      "search_value": "ค่าที่ใช้ค้นหา เช่น ชื่อคนหรือชื่อทีมที่ต้องการแก้",
+      "updates": {{
+        "ชื่อ header คอลัมน์ที่จะแก้": "ค่าใหม่"
+      }}
+    }}
   ],
   "summary": {{
     "individual_entries": [
@@ -237,11 +348,14 @@ discord_user = {discord_user}
     ],
     "team_entries": [
       {{"ชื่อทีม": "...", "ประเภท": "...", "payment_status": "จ่ายแล้ว หรือ ยังไม่จ่าย", "ผู้เล่น": []}}
+    ],
+    "edit_summary": [
+      {{"ค้นหา": "ชื่อ/ชื่อทีมที่แก้", "การแก้ไข": "อธิบายสั้นๆว่าแก้อะไร"}}
     ]
   }}
 }}
  
-กฎ:
+กฎสำหรับสมัครใหม่ (type = individual/team/mixed):
 - กรอกข้อมูลลง array ให้ตรงตาม Headers ที่ให้ไว้ทุก column
 - column timestamp/ประทับเวลา ใส่ค่า timestamp ที่ให้มา
 - column ชำระ/QR/สแกน ใส่สถานะจ่ายเงิน (จ่ายแล้ว หรือ ยังไม่จ่าย)
@@ -249,17 +363,32 @@ discord_user = {discord_user}
 - ตัวเลขในวงเล็บ () หลังชื่อ = แรงค์
 - "(จ่ายแล้ว)" ติดกับชื่อใคร = คนนั้นจ่ายแล้ว คนอื่นยังไม่จ่าย
 - ถ้าไม่ระบุสถานะ = ยังไม่จ่าย
-- ถ้าไม่เกี่ยวการสมัคร ตอบ {{"type": "unknown", "individual_rows": [], "team_rows": [], "summary": {{}}}}
+ 
+กฎสำหรับแก้ไขข้อมูลเดิม (type = edit):
+- ใช้เมื่อข้อความบอกให้แก้ไข/เปลี่ยน/อัปเดต/correct ข้อมูลที่สมัครไปแล้ว เช่น
+  "แก้ชื่อ สมชาย เป็น สมศักดิ์", "เปลี่ยนแรงค์ของ มานี เป็น A", "สมชาย จ่ายเงินแล้วนะ", "ทีมไฟฟ้า เปลี่ยนชื่อทีมเป็น ไฟแรง"
+- search_column ควรเป็นคอลัมน์ที่ระบุตัวบุคคล/ทีมได้ เช่น "ชื่อ" หรือ "ชื่อทีม" หรือ "ชื่อ-สกุล" (เลือกจาก headers ที่ให้มา)
+- search_value = ค่าเดิมที่ใช้ค้นหาแถว (เช่นชื่อปัจจุบันของคน/ทีมนั้น)
+- updates = {{คอลัมน์: ค่าใหม่}} เฉพาะคอลัมน์ที่ต้องการแก้ไขเท่านั้น โดยชื่อคอลัมน์ต้องตรงกับ headers ที่ให้มา
+- ถ้าแก้สถานะจ่ายเงิน ใช้คำว่า "จ่ายแล้ว" หรือ "ยังไม่จ่าย" สำหรับคอลัมน์ชำระ/QR/สแกน
+- ไม่ต้องส่ง individual_rows/team_rows สำหรับ type = edit
+ 
+- ถ้าไม่เกี่ยวการสมัครหรือการแก้ไขเลย ตอบ {{"type": "unknown", "individual_rows": [], "team_rows": [], "edit_actions": [], "summary": {{}}}}
  
 ข้อความ: {text}"""
  
     try:
         raw = await call_ai(prompt, image_data)
         raw = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw)
+        data = json.loads(raw)
+        data.setdefault("individual_rows", [])
+        data.setdefault("team_rows", [])
+        data.setdefault("edit_actions", [])
+        data.setdefault("summary", {})
+        return data
     except Exception as e:
         print(f"AI process error: {e}")
-        return {"type": "unknown", "individual_rows": [], "team_rows": [], "summary": {}}
+        return {"type": "unknown", "individual_rows": [], "team_rows": [], "edit_actions": [], "summary": {}}
  
  
 # ========== SAVE ==========
@@ -282,6 +411,65 @@ async def save_entries(result: dict, config: dict) -> tuple[int, int]:
         team_count = len(team_rows)
  
     return individual_count, team_count
+ 
+ 
+async def apply_edits(result: dict, config: dict) -> list[dict]:
+    """ทำการแก้ไขข้อมูลตาม edit_actions ที่ AI ส่งมา คืนค่า list ของผลลัพธ์แต่ละ action"""
+    results = []
+    for action in result.get("edit_actions", []):
+        sheet_key = action.get("sheet")
+        if sheet_key not in ("individual", "team"):
+            continue
+        sheet_cfg = config.get(sheet_key, {})
+        sheet_id = sheet_cfg.get("sheet_id")
+        gid = sheet_cfg.get("sheet_gid", 0)
+        if not sheet_id:
+            results.append({
+                "sheet": sheet_key,
+                "search_value": action.get("search_value", ""),
+                "status": "no_sheet"
+            })
+            continue
+ 
+        search_column = action.get("search_column", "")
+        search_value = action.get("search_value", "")
+        updates = action.get("updates", {})
+ 
+        if not search_column or not search_value or not updates:
+            results.append({
+                "sheet": sheet_key,
+                "search_value": search_value,
+                "status": "invalid_action"
+            })
+            continue
+ 
+        res = await asyncio.to_thread(
+            _find_and_update, sheet_id, gid, search_column, search_value, updates
+        )
+ 
+        if res["matches"] > 1:
+            results.append({
+                "sheet": sheet_key,
+                "search_value": search_value,
+                "status": "multiple_matches",
+                "matches": res["matches"]
+            })
+        elif not res["found"]:
+            results.append({
+                "sheet": sheet_key,
+                "search_value": search_value,
+                "status": "not_found"
+            })
+        else:
+            results.append({
+                "sheet": sheet_key,
+                "search_value": search_value,
+                "status": "updated",
+                "updated_columns": res["updated_columns"],
+                "row_index": res["row_index"]
+            })
+ 
+    return results
  
  
 # ========== SLASH COMMANDS ==========
@@ -497,10 +685,44 @@ async def on_message(message: discord.Message):
             discord_user
         )
  
-    if result.get("type") == "unknown":
+    msg_type = result.get("type")
+ 
+    if msg_type == "unknown":
         return
  
+    # ========== กรณีแก้ไขข้อมูลเดิม ==========
+    if msg_type == "edit":
+        edit_results = await apply_edits(result, config)
+ 
+        if not edit_results:
+            await message.reply("⚠️ ไม่พบคำสั่งแก้ไขที่ชัดเจนในข้อความนี้")
+            return
+ 
+        lines = ["## ✏️ ผลการแก้ไขข้อมูล"]
+        for r in edit_results:
+            sheet_name = "บุคคล" if r["sheet"] == "individual" else "ทีม"
+            sv = r.get("search_value", "")
+            status = r["status"]
+            if status == "updated":
+                cols = ", ".join(r.get("updated_columns", []))
+                lines.append(f"✅ [{sheet_name}] แก้ไข **{sv}** — อัปเดตคอลัมน์: {cols} (แถวที่ {r.get('row_index')})")
+            elif status == "not_found":
+                lines.append(f"❌ [{sheet_name}] ไม่พบข้อมูล **{sv}** ในชีท")
+            elif status == "multiple_matches":
+                lines.append(f"⚠️ [{sheet_name}] พบหลายแถวที่ตรงกับ **{sv}** ({r.get('matches')} แถว) — กรุณาระบุให้ชัดเจนขึ้น")
+            elif status == "no_sheet":
+                lines.append(f"❌ [{sheet_name}] ยังไม่ได้ตั้งค่าชีท — ใช้ `/setup` ก่อน")
+            else:
+                lines.append(f"❌ [{sheet_name}] ข้อมูลแก้ไขไม่สมบูรณ์สำหรับ **{sv}**")
+ 
+        await message.reply("\n".join(lines))
+        return
+ 
+    # ========== กรณีสมัครใหม่ (individual / team / mixed) ==========
     individual_count, team_count = await save_entries(result, config)
+ 
+    if individual_count == 0 and team_count == 0:
+        return
  
     # สร้าง reply จาก summary
     summary = result.get("summary", {})
@@ -545,4 +767,3 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 print(f"🌐 Web server running on port {port}")
  
 client.run(DISCORD_TOKEN)
- 
